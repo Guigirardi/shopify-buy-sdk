@@ -14,10 +14,10 @@
   };
 
   function formatPrice(amount, currencyCode) {
-    if (!amount && amount !== 0) return '';
-    const symbol = CURRENCY_SYMBOLS[currencyCode] || currencyCode || '';
+    if (amount === undefined || amount === null) return '';
     const num = typeof amount === 'string' ? parseFloat(amount) : amount;
-    if (isNaN(num)) return symbol;
+    if (isNaN(num)) return '';
+    const symbol = CURRENCY_SYMBOLS[currencyCode] || '';
     return symbol + num.toFixed(2);
   }
 
@@ -49,7 +49,6 @@
         return;
       }
 
-      // Evita duplicar
       if (this.instances[containerId]) {
         console.warn('[ShopifyBuySDK] Instance already initialized for', containerId);
         return;
@@ -65,14 +64,9 @@
       this.instances[containerId] = instance;
       instance.render();
 
-      // Extensão de customização externa opcional (ex: Supabase)
       if (config.customizationExtension && typeof config.customizationExtension === 'function') {
         try {
-          config.customizationExtension({
-            ShopifyBuySDK,
-            instance,
-            config
-          });
+          config.customizationExtension({ ShopifyBuySDK, instance, config });
         } catch (e) {
           console.warn('[ShopifyBuySDK] customizationExtension error:', e);
         }
@@ -84,9 +78,13 @@
 
     updateAllDrawers: function() {
       Object.values(this.instances).forEach(inst => {
-        if (inst.drawer) inst.drawer.updateContent();
+        if (inst.drawer && typeof inst.drawer.updateContent === 'function') {
+          inst.drawer.updateContent();
+        }
       });
-      if (this.floatingCart) this.floatingCart.updateBadge();
+      if (this.floatingCart && typeof this.floatingCart.updateBadge === 'function') {
+        this.floatingCart.updateBadge();
+      }
     }
   };
 
@@ -111,21 +109,19 @@
         alignment === 'left' ? 'flex-start' :
         alignment === 'right' ? 'flex-end' : 'center';
 
-      // Variant select (se tiver mais de um)
       if (variants.length > 1) {
         const select = document.createElement('select');
         select.className = 'shopify-variant-select';
         variants.forEach((variant, i) => {
           const opt = document.createElement('option');
           opt.value = i;
-          opt.textContent = variant.title || `Variant ${i+1}`;
+          opt.textContent = variant.title || `Variant ${i + 1}`;
           select.appendChild(opt);
         });
         this.container.appendChild(select);
         this.variantSelect = select;
       }
 
-      // Botão
       const btnCfg = this.config.button || {};
       const button = document.createElement('button');
       button.className = 'shopify-buy-button';
@@ -168,18 +164,11 @@
 
       this.container.appendChild(button);
 
-      // Drawer global
+      // Drawer global (uma vez só)
       if (!document.getElementById('shopify-cart-drawer')) {
         this.drawer = new CartDrawer(this.config);
       } else {
-        this.drawer = {
-          updateContent: () => {
-            const existing = document.getElementById('shopify-cart-drawer');
-            if (existing) {
-              // conteúdo atualizado pela função estática
-            }
-          }
-        };
+        this.drawer = { updateContent: () => {} };
       }
 
       // Floating cart global
@@ -191,14 +180,12 @@
     getSelectedVariant() {
       const product = this.config.product || {};
       const variants = product.variants || [];
-
       if (!variants.length) return null;
 
       if (this.variantSelect) {
         const idx = this.variantSelect.selectedIndex;
         return variants[idx] || variants[0];
       }
-
       return variants[0];
     }
 
@@ -238,7 +225,7 @@
     }
   }
 
-  // ================== CART DRAWER ==================
+  // ================== CART DRAWER (COM UPSELL) ==================
   class CartDrawer {
     constructor(config) {
       this.config = config || {};
@@ -273,8 +260,7 @@
           ${cfg.showShippingNotice !== false ? `
             <p class="cart-notice">
               ${cfg.shippingNotice || 'Shipping and taxes calculated at checkout'}
-            </p>
-          ` : ''}
+            </p>` : ''}
           <button class="checkout-button">${cfg.checkout || 'Checkout'}</button>
         </div>
       `;
@@ -288,6 +274,59 @@
         .addEventListener('click', () => this.handleCheckout());
 
       this.updateContent();
+    }
+
+    buildUpsellsHtml() {
+      const cfg = this.config;
+      const upsells = cfg.upsells || [];
+      if (!upsells.length) return '';
+
+      const title = cfg.upsellSectionTitle || 'Frequently bought together';
+
+      const itemsHtml = upsells.map((u, idx) => {
+        const p = u.product || {};
+        const img =
+          u.customImage ||
+          (p.images && p.images.edges && p.images.edges[0] && p.images.edges[0].node && p.images.edges[0].node.url) ||
+          '';
+        const variantsEdges = (p.variants && p.variants.edges) || [];
+        const vNode = variantsEdges[0] && variantsEdges[0].node;
+        if (!vNode) return '';
+
+        const price = vNode.price || p.price || { amount: '0.00', currencyCode: 'USD' };
+        const map = {
+          variantId: vNode.id,
+          title: u.customTitle || p.title || 'Product',
+          image: img,
+          price: price,
+          selectedOptions: vNode.selectedOptions || []
+        };
+
+        const encoded = encodeURIComponent(JSON.stringify(map));
+
+        return `
+          <div class="upsell-product">
+            <img src="${img}" alt="${map.title}">
+            <div style="flex:1;display:flex;flex-direction:column;gap:4px;">
+              <div style="font-size:13px;font-weight:500;">${map.title}</div>
+              <div style="font-size:13px;font-weight:600;">${formatPrice(price.amount, price.currencyCode)}</div>
+            </div>
+            <button class="upsell-btn"
+              style="background:${u.buttonBgColor || '#000'};color:${u.buttonTextColor || '#fff'}"
+              onclick="window.addUpsellToCart(event, decodeURIComponent(this.dataset.map))"
+              data-map="${encoded}">+
+            </button>
+          </div>
+        `;
+      }).join('');
+
+      if (!itemsHtml.trim()) return '';
+      return `
+        <div class="cart-upsell">
+          <h4>${title}</h4>
+          ${itemsHtml}
+        </div>
+      `;
     }
 
     updateContent() {
@@ -309,7 +348,7 @@
       let total = 0;
       let currencyCode = 'USD';
 
-      const html = cart.items.map((item, index) => {
+      const itemsHtml = cart.items.map((item, index) => {
         const priceAmount = item.price?.amount || item.price;
         const lineTotal = (parseFloat(priceAmount) || 0) * item.quantity;
         total += lineTotal;
@@ -317,14 +356,14 @@
 
         const variantText = (item.selectedOptions || [])
           .map(o => o.value)
-          .join(' / ');
+          .join(' / ') || item.variantTitle || '';
 
         return `
           <div class="cart-item" data-index="${index}">
             <img src="${item.image || ''}" alt="${item.productTitle || ''}" class="cart-item-image" />
             <div class="cart-item-details">
               <h4>${item.productTitle || ''}</h4>
-              <p class="cart-item-variant">${variantText || item.variantTitle || ''}</p>
+              <p class="cart-item-variant">${variantText}</p>
               <div class="cart-item-controls">
                 <button class="qty-btn" data-action="decrease" data-index="${index}">−</button>
                 <span class="qty-display">${item.quantity}</span>
@@ -339,7 +378,14 @@
         `;
       }).join('');
 
-      itemsContainer.innerHTML = html;
+      const upsellsHtml = this.buildUpsellsHtml();
+      const pos = this.config.upsellPosition || 'after_items';
+
+      itemsContainer.innerHTML =
+        pos === 'before_items'
+          ? upsellsHtml + itemsHtml
+          : itemsHtml + upsellsHtml;
+
       totalElement.textContent = formatPrice(total, currencyCode);
 
       itemsContainer.querySelectorAll('.qty-btn').forEach(btn => {
@@ -503,9 +549,17 @@
     }
   }
 
-  // ================== UPSELL GLOBAL HANDLER ==================
-  window.addUpsellToCart = function(event, map) {
+  // ================== UPSELL HANDLER ==================
+  window.addUpsellToCart = function(event, mapStr) {
+    if (!mapStr) return;
+    let map;
+    try {
+      map = JSON.parse(mapStr);
+    } catch (e) {
+      try { map = JSON.parse(decodeURIComponent(mapStr)); } catch (e2) { return; }
+    }
     if (!map || !map.variantId) return;
+
     const cart = ShopifyBuySDK.getCart();
     const existing = cart.items.find(i => i.variantId === map.variantId);
 
@@ -533,7 +587,7 @@
       setTimeout(() => {
         btn.innerHTML = original;
         btn.style.opacity = '1';
-      }, 1500);
+      }, 800);
     }
   };
 
